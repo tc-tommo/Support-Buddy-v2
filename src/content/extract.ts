@@ -40,20 +40,21 @@ classifier.onMessage.addListener((message) => {
 
 let timelineObserver: MutationObserver | null = null;
 
-const filterNodes = (mutations, predicate: (element: HTMLElement) => boolean) => {
-    mutations.forEach((mutation) => {
-        mutation.addedNodes.forEach((node) => {
-            if (node.nodeType === Node.ELEMENT_NODE) {
-                const element = node as HTMLElement;
-                if (predicate(element)) return element;
-            }
+const findNode = (mutations: MutationRecord[], predicate: (element: HTMLElement) => boolean): HTMLElement | undefined => {
+    return mutations.find((mutation) => {
+         mutation.addedNodes.forEach((node) => {
+            if (node.nodeType === Node.ELEMENT_NODE && predicate(node as HTMLElement)) return node;
         });
-    });
+    })?.target as HTMLElement;
+}
 
-const rootObserver = new MutationObserver(mutations => 
-    filterNodes(mutations, 
-        (e) => e.matches('div') && e.attributes.getNamedItem('data-testid')?.value === 'primaryColumn')
-    );
+const rootObserver = new MutationObserver(mutations => {
+    const column = findNode(mutations, 
+        (e) => e.matches('div') && e.attributes.getNamedItem('data-testid')?.value === 'primaryColumn');
+    if (column) {
+        // open timeline observer, close root observer
+    }
+});
 
 rootObserver.observe(document.body, {
     childList: true,
