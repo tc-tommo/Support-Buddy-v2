@@ -1,62 +1,111 @@
-import { MESSAGE as MODEL } from '../background/model';
+import { Tweet } from './tweet';
 
-export class Tweet {
-
-    text: string; // Text of the tweet
-    id: string; // Status id from url
-    author: string; // Author of the tweet
-    date: string; // Creation date of the tweet
-    imageURLs: string; // URL of the image in the tweet
-    imageCaptions: string; // Caption of the image in the tweet
-    
-    constructor(article: HTMLElement) {
-        // get from DOM
-    }
+export const MESSAGE = {
+    PORT_ID: 'classifier',
+    TYPE: {
+        CLASSIFY: 'classify',
+        ERROR: 'error',
+        RESULTS: 'results',
+        LOADING: 'loading',
+        READY: 'ready',
+        STATUS: 'status'
+    },
 }
 
-const classifier = chrome.runtime.connect({ name: MODEL.PORT_ID });
+console.log('Extraction script loaded');
+const classifier = chrome.runtime.connect({ name: MESSAGE.PORT_ID });
+console.log('Requesting classifier status');
+classifier.postMessage({ type: MESSAGE.TYPE.STATUS });
 
+classifier.onMessage.addListener((message) => {
+    switch (message.type) {
+        case MESSAGE.TYPE.LOADING:
+            console.log('Classifier loading');
+            break;
+        case MESSAGE.TYPE.READY:
+            console.log('Classifier ready');
+            break;
+    }
+});
 classifier.onDisconnect.addListener(() => {
     console.error('Classifier disconnected');
 });
 
-chrome.runtime.onConnect.addListener((port) => {
-    if (port.name === MODEL.PORT_ID) console.log(`Classifier connected`);
-});
+const port = chrome.runtime.connect({ name: MESSAGE.PORT_ID });
 
-classifier.onMessage.addListener((message) => {
-    switch (message.type) {
-        case MODEL.TYPE.RESULTS:
-            console.log(message.results);
-            break;
-        case MODEL.TYPE.ERROR:
-            console.error(message.message);
-            break;
-        default:
-            console.warn(`Unknown message type: ${message.type}`);
-            break;
-    }
-});
+let observedIds = new Set<string>();
 
-let timelineObserver: MutationObserver | null = null;
-
-const findNode = (mutations: MutationRecord[], predicate: (element: HTMLElement) => boolean): HTMLElement | undefined => {
-    return mutations.find((mutation) => {
-         mutation.addedNodes.forEach((node) => {
-            if (node.nodeType === Node.ELEMENT_NODE && predicate(node as HTMLElement)) return node;
-        });
-    })?.target as HTMLElement;
+// Find the virtual scroll container (the div with position:relative inside timeline)
+function findVirtualScrollContainer(): HTMLElement | null {
+    const timeline = document.querySelector('div[aria-label="Timeline: Your Home Timeline"]');
+    if (!timeline) return null;
+    
+    // The virtual scroll container is the direct child div with position:relative
+    const container = timeline.querySelector(':scope > div[style*="position: relative"]');
+    return container as HTMLElement | null;
 }
 
-const rootObserver = new MutationObserver(mutations => {
-    const column = findNode(mutations, 
-        (e) => e.matches('div') && e.attributes.getNamedItem('data-testid')?.value === 'primaryColumn');
-    if (column) {
-        // open timeline observer, close root observer
+// Extract articles from a cellInnerDiv
+function extractArticlesFromCell(cell: HTMLElement): void {
+    const articles = cell.querySelectorAll('article[data-testid="tweet"]');
+    articles.forEach(article => {
+        const statusId = Tweet.statusIdFromElement(article);
+        if (!statusId) return;
+        if (observedIds.has(statusId)) return;
+        observedIds.add(statusId);
+        const tweet = Tweet.fromElement(article);
+        if (!tweet) return;
+        // classifier.postMessage({ type: MESSAGE.TYPE.CLASSIFY, text: tweet.text });
+    });
+}
+
+// Observer for the virtual scroll container - watches for new cellInnerDiv additions
+const virtualScrollObserver = new MutationObserver(mutations => {
+    mutations.forEach(mutation => {
+        mutation.addedNodes.forEach(node => {
+            if (node instanceof HTMLElement && node.getAttribute('data-testid') === 'cellInnerDiv') {
+                // New cell container added - extract articles immediately
+                extractArticlesFromCell(node);
+            }
+        });
+    });
+});
+
+// Root observer to find and set up observation on the virtual scroll container
+const rootObserver = new MutationObserver(() => {
+    const container = findVirtualScrollContainer();
+    if (container) {
+        console.log('Virtual scroll container found:', container);
+        
+        // Observe only childList changes (when cellInnerDiv elements are added/removed)
+        // This is more efficient than subtree since we only care about direct children
+        virtualScrollObserver.observe(container, { 
+            childList: true,  // Only watch for added/removed children
+            // subtree: false - not needed since cellInnerDiv is direct child
+        });
+        
+        // Extract any existing articles on initial load
+        const existingCells = container.querySelectorAll('div[data-testid="cellInnerDiv"]');
+        existingCells.forEach(cell => extractArticlesFromCell(cell as HTMLElement));
+        
+        rootObserver.disconnect();
+        console.log('Virtual scroll observer started');
     }
 });
 
+console.log('Starting root observer');
 rootObserver.observe(document.body, {
     childList: true,
     subtree: true,
 });
+
+// Also try to find container immediately if DOM is already loaded
+if (document.readyState === 'complete' || document.readyState === 'interactive') {
+    const container = findVirtualScrollContainer();
+    if (container) {
+        virtualScrollObserver.observe(container, { childList: true });
+        const existingCells = container.querySelectorAll('div[data-testid="cellInnerDiv"]');
+        existingCells.forEach(cell => extractArticlesFromCell(cell as HTMLElement));
+        rootObserver.disconnect();
+    }
+}
